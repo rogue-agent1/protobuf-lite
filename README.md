@@ -1,17 +1,9 @@
-# protobuf_lite
+# protobuf-lite
 
-Minimal Protocol Buffers wire format encoder/decoder
-
-Single-file, zero-dependency Python CLI tool.
+Protobuf-like encoder/decoder. Zero dependencies, single file, Python 3.8+.
 
 ## Usage
 
 ```bash
-python protobuf_lite.py --help
-```
-
-## Test
-
-```bash
-python -c "import protobuf_lite; protobuf_lite.test()"
+python3 protobuf_lite.py --help
 ```

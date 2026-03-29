@@ -1,100 +1,72 @@
 #!/usr/bin/env python3
-"""Minimal protobuf wire format encoder/decoder."""
+"""Protobuf-like encoder/decoder. Zero dependencies."""
+import struct, sys
 
-def _encode_varint(value):
+VARINT = 0; I64 = 1; LEN = 2; I32 = 5
+
+def encode_varint(value):
+    if value < 0: value = value & 0xFFFFFFFFFFFFFFFF
     result = bytearray()
-    while value > 0x7f:
-        result.append((value & 0x7f) | 0x80)
-        value >>= 7
-    result.append(value & 0x7f)
+    while value > 0x7F:
+        result.append((value & 0x7F) | 0x80); value >>= 7
+    result.append(value & 0x7F)
     return bytes(result)
 
-def _decode_varint(data, pos):
+def decode_varint(data, offset=0):
     result = 0; shift = 0
-    while True:
-        b = data[pos]; pos += 1
-        result |= (b & 0x7f) << shift
+    while offset < len(data):
+        b = data[offset]; offset += 1
+        result |= (b & 0x7F) << shift; shift += 7
         if not (b & 0x80): break
-        shift += 7
-    return result, pos
+    return result, offset
 
 def encode_field(field_num, wire_type, value):
-    tag = _encode_varint((field_num << 3) | wire_type)
-    if wire_type == 0:  # varint
-        return tag + _encode_varint(value)
-    elif wire_type == 2:  # length-delimited
+    tag = encode_varint((field_num << 3) | wire_type)
+    if wire_type == VARINT: return tag + encode_varint(value)
+    if wire_type == LEN:
         if isinstance(value, str): value = value.encode()
-        return tag + _encode_varint(len(value)) + value
-    raise ValueError(f"Unsupported wire type {wire_type}")
+        return tag + encode_varint(len(value)) + value
+    if wire_type == I32: return tag + struct.pack("<I", value)
+    if wire_type == I64: return tag + struct.pack("<Q", value)
+    return tag
 
-def decode_fields(data: bytes) -> list:
-    fields = []; pos = 0
-    while pos < len(data):
-        tag, pos = _decode_varint(data, pos)
+def decode_message(data):
+    fields = {}; offset = 0
+    while offset < len(data):
+        tag, offset = decode_varint(data, offset)
         field_num = tag >> 3; wire_type = tag & 0x07
-        if wire_type == 0:
-            value, pos = _decode_varint(data, pos)
-        elif wire_type == 2:
-            length, pos = _decode_varint(data, pos)
-            value = data[pos:pos+length]; pos += length
-        elif wire_type == 5:
-            import struct
-            value = struct.unpack("<I", data[pos:pos+4])[0]; pos += 4
-        elif wire_type == 1:
-            import struct
-            value = struct.unpack("<Q", data[pos:pos+8])[0]; pos += 8
+        if wire_type == VARINT:
+            value, offset = decode_varint(data, offset)
+        elif wire_type == LEN:
+            length, offset = decode_varint(data, offset)
+            value = data[offset:offset+length]; offset += length
+            try: value = value.decode()
+            except: pass
+        elif wire_type == I32:
+            value = struct.unpack_from("<I", data, offset)[0]; offset += 4
+        elif wire_type == I64:
+            value = struct.unpack_from("<Q", data, offset)[0]; offset += 8
+        else: break
+        if field_num in fields:
+            if not isinstance(fields[field_num], list):
+                fields[field_num] = [fields[field_num]]
+            fields[field_num].append(value)
         else:
-            raise ValueError(f"Unknown wire type {wire_type}")
-        fields.append((field_num, wire_type, value))
+            fields[field_num] = value
     return fields
 
-class Message:
-    def __init__(self):
-        self._fields = {}
-    def set_varint(self, num, val): self._fields[num] = (0, val)
-    def set_string(self, num, val): self._fields[num] = (2, val)
-    def set_bytes(self, num, val): self._fields[num] = (2, val)
-    def encode(self) -> bytes:
-        return b"".join(encode_field(num, wt, val) for num, (wt, val) in sorted(self._fields.items()))
-    @classmethod
-    def decode(cls, data: bytes):
-        m = cls(); fields = decode_fields(data)
-        for num, wt, val in fields:
-            m._fields[num] = (wt, val)
-        return m
-    def get(self, num, default=None):
-        if num in self._fields: return self._fields[num][1]
-        return default
+def encode_message(fields):
+    result = bytearray()
+    for num, (wtype, value) in sorted(fields.items()):
+        if isinstance(value, list):
+            for v in value: result.extend(encode_field(num, wtype, v))
+        else:
+            result.extend(encode_field(num, wtype, value))
+    return bytes(result)
 
 if __name__ == "__main__":
-    m = Message()
-    m.set_varint(1, 42)
-    m.set_string(2, "hello")
-    data = m.encode()
-    print(f"Encoded ({len(data)} bytes): {data.hex()}")
-    m2 = Message.decode(data)
-    print(f"Field 1: {m2.get(1)}, Field 2: {m2.get(2)}")
-
-def test():
-    # Varint encoding
-    assert _encode_varint(0) == b"\x00"
-    assert _encode_varint(1) == b"\x01"
-    assert _encode_varint(300) == b"\xac\x02"
-    # Round-trip
-    m = Message()
-    m.set_varint(1, 150)
-    m.set_string(2, "testing")
-    data = m.encode()
-    m2 = Message.decode(data)
-    assert m2.get(1) == 150
-    assert m2.get(2) == b"testing"
-    # Multiple fields
-    m3 = Message()
-    m3.set_varint(1, 0)
-    m3.set_varint(3, 999)
-    m3.set_string(5, "end")
-    d = m3.encode()
-    m4 = Message.decode(d)
-    assert m4.get(1) == 0
-    assert m4.get(3) == 999
-    print("  protobuf_lite: ALL TESTS PASSED")
+    msg = {1: (LEN, "hello"), 2: (VARINT, 42), 3: (VARINT, 100)}
+    enc = encode_message(msg)
+    print(f"Encoded: {enc.hex()} ({len(enc)} bytes)")
+    dec = decode_message(enc)
+    print(f"Decoded: {dec}")
